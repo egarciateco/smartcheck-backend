@@ -1,12 +1,8 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import time
-import json
-import os
-import asyncio
-from engine import scrape_all_stores
 
-app = FastAPI(title="SmartCheck-REAL-LIVE", version="3.0.0")
+app = FastAPI(title="SmartCheck-API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -16,18 +12,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-def load_json(filename):
-    try:
-        backend_dir = os.path.dirname(os.path.abspath(__file__))
-        with open(os.path.join(backend_dir, filename), "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"⚠️ Error cargando {filename}: {e}")
-        return {}
-
 @app.get("/")
 def root():
-    return {"app": "SmartCheck-REAL-LIVE 🛒", "status": "running", "data_source": "WEBS_COMERCIALES_LIVE"}
+    return {"app": "SmartCheck-API", "status": "running", "version": "1.0.0"}
 
 @app.get("/health")
 def health():
@@ -35,29 +22,37 @@ def health():
 
 @app.get("/api/v1/locations/provincias")
 def get_provincias():
-    return {"provincias": list(load_json("provincias.json").keys())}
+    return {"provincias": ["Buenos Aires", "CABA", "Córdoba", "Santa Fe"]}
 
 @app.get("/api/v1/locations/localidades")
 def get_localidades(provincia: str = Query(...)):
-    data = load_json("provincias.json")
+    data = {
+        "Buenos Aires": ["La Plata", "Mar del Plata", "Bahía Blanca"],
+        "CABA": ["Palermo", "Recoleta", "Belgrano"],
+        "Córdoba": ["Córdoba Capital", "Villa María"],
+        "Santa Fe": ["Rosario", "Santa Fe Capital"]
+    }
     if provincia not in data:
-        raise HTTPException(404, "Provincia no encontrada")
+        raise HTTPException(status_code=404, detail="Provincia no encontrada")
     return {"provincia": provincia, "localidades": data[provincia]}
 
 @app.get("/api/v1/categorias")
 def get_categorias():
-    return {"categorias": list(load_json("categorias.json").keys())}
+    return {"categorias": ["Supermercados", "Farmacias", "Electrónica"]}
 
 @app.get("/api/v1/categorias/items")
 def get_categoria_items(categoria: str = Query(...)):
-    data = load_json("categorias.json")
+    data = {
+        "Supermercados": ["leche", "aceite", "arroz", "fideos", "azúcar"],
+        "Farmacias": ["ibuprofeno", "paracetamol", "alcohol", "curitas"],
+        "Electrónica": ["cable usb", "auriculares", "powerbank"]
+    }
     if categoria not in data:
-        raise HTTPException(404, "Rubro no encontrado")
+        raise HTTPException(status_code=404, detail="Rubro no encontrado")
     return {"categoria": categoria, "items": data[categoria]}
 
-# 🔍 COMPARACIÓN EN TIEMPO REAL (SIN SIMULACIÓN)
 @app.get("/api/v1/compare")
-async def compare_prices(
+def compare_prices(
     products: str = Query(...),
     provincia: str = Query(...),
     localidad: str = Query(...),
@@ -65,33 +60,40 @@ async def compare_prices(
 ):
     product_list = [p.strip() for p in products.split(",") if p.strip()]
     if not product_list:
-        raise HTTPException(400, "Faltan artículos")
-
-    # 🛒 COMERCIOS A CONSULTAR EN TIEMPO REAL
-    STORES_TO_SCRAPE = ["Carrefour", "Coto"]  # Agregar más según necesites
+        raise HTTPException(status_code=400, detail="Faltan artículos")
     
-    # 🌐 EJECUTAR SCRAPING EN PARALELO (PRECIO ACTUAL DE CADA WEB)
-    live_results = await scrape_all_stores(STORES_TO_SCRAPE, product_list, localidad)
-
-    # Filtrar solo los que trajeron precios reales
-    valid_stores = [r for r in live_results if r.get("status") == "success" and r.get("total", 0) > 0]
-    error_stores = [r for r in live_results if r.get("status") != "success"]
-
-    if not valid_stores and not error_stores:
-        raise HTTPException(404, "Ningún comercio disponible en este momento")
-
-    valid_stores.sort(key=lambda x: x["total"])
-
+    # DATOS DE PRUEBA (para validar conexión frontend-backend)
     return {
         "location": {"provincia": provincia, "localidad": localidad},
         "categoria": categoria,
         "products": product_list,
-        "source": "WEB_SCRAPING_LIVE",
-        "all_stores": valid_stores,
-        "scraping_errors": error_stores,  # Transparencia total
-        "cheapest": valid_stores[0] if valid_stores else None,
+        "source": "mock_data_for_testing",
+        "all_stores": [
+            {
+                "name": f"Comercio Demo {localidad}",
+                "address": f"Av. Prueba 123, {localidad}",
+                "total": sum([1250 for _ in product_list]),
+                "items_found": len(product_list),
+                "delivery_time": "30 min",
+                "metodos_pago": ["💳 Efectivo", "💳 Débito", "📱 Mercado Pago"],
+                "item_prices": [{"item": p, "price": 1250} for p in product_list]
+            },
+            {
+                "name": f"Otro Comercio {localidad}",
+                "address": f"Calle Test 456, {localidad}",
+                "total": sum([1350 for _ in product_list]),
+                "items_found": len(product_list),
+                "delivery_time": "45 min",
+                "metodos_pago": ["💳 Efectivo", "📱 Mercado Pago"],
+                "item_prices": [{"item": p, "price": 1350} for p in product_list]
+            }
+        ],
+        "cheapest": {
+            "name": f"Comercio Demo {localidad}",
+            "total": sum([1250 for _ in product_list])
+        },
         "timestamp": time.time(),
-        "note": "Precios extraídos EN VIVO de las páginas oficiales de cada comercio. Revisados en cada consulta."
+        "note": "Datos de prueba para validar conexión. Scraping real se activará después."
     }
 
 @app.get("/api/v1/premium/link")
