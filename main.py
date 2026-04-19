@@ -86,7 +86,7 @@ def get_categorias():
 def get_categoria_items(categoria: str = Query(...)):
     data = load_json("categorias.json")
     # ✅ LÍNEA COMPLETA - NO CORTAR:
-    if categoria not in 
+    if categoria not in data:
         raise HTTPException(status_code=404, detail="Rubro no encontrado")
     items = data[categoria] if isinstance(data[categoria], list) else []
     if not items:
