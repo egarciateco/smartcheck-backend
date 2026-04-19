@@ -77,6 +77,7 @@ def get_provincias():
 @app.get("/api/v1/locations/localidades")
 def get_localidades(provincia: str = Query(...)):
     data = load_json("provincias.json")
+    # ✅ CORREGIDO: "data" al final de la condición
     if provincia not in data:
         raise HTTPException(status_code=404, detail="Provincia no encontrada")
     return {"provincia": provincia, "localidades": data[provincia]}
@@ -92,6 +93,7 @@ def get_categorias():
 @app.get("/api/v1/categorias/items")
 def get_categoria_items(categoria: str = Query(...)):
     data = load_json("categorias.json")
+    # ✅ CORREGIDO: "data" al final de la condición
     if categoria not in data:
         raise HTTPException(status_code=404, detail="Rubro no encontrado")
     items = data[categoria] if isinstance(data[categoria], list) else []
@@ -105,7 +107,7 @@ def generar_precios_reales(producto: str, localidad: str) -> List[Dict]:
     producto_lower = producto.lower().strip()
     
     # Buscar referencia de precio
-    precio_ref = PRECIOS_REFERENCIA.get("leche")  # Default
+    precio_ref = PRECIOS_REFERENCIA.get("leche")
     for key, val in PRECIOS_REFERENCIA.items():
         if key in producto_lower:
             precio_ref = val
@@ -115,14 +117,12 @@ def generar_precios_reales(producto: str, localidad: str) -> List[Dict]:
     comercios_lista = COMERCIOS.get(localidad, COMERCIOS["La Plata"])
     
     for comercio in comercios_lista:
-        # Precio aleatorio dentro del rango
         precio = random.randint(precio_ref["min"], precio_ref["max"])
-        # Redondear a decena
         precio = round(precio, -1)
         
         results.append({
             "store": comercio["name"],
-            "address": f"{comercio['address']}, {localidad}",
+            "address": comercio["address"] + ", " + localidad,
             "delivery_time": comercio["delivery"],
             "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
             "item_prices": [{"item": producto.capitalize(), "price": precio}],
@@ -148,7 +148,6 @@ def compare_prices(
         precios = generar_precios_reales(producto, localidad)
         all_stores.extend(precios)
     
-    # Agrupar por comercio si hay múltiples productos
     if len(product_list) > 1:
         stores_dict = {}
         for store in all_stores:
@@ -163,10 +162,11 @@ def compare_prices(
             stores_dict[name]["items_found"] += 1
         all_stores = list(stores_dict.values())
     
-    # Ordenar por precio (más barato primero)
     all_stores.sort(key=lambda x: x["total"])
     
-    cheapest = {"name": all_stores[0]["name"], "total": all_stores[0]["total"]} if all_stores else None
+    cheapest = None
+    if all_stores:
+        cheapest = {"name": all_stores[0]["name"], "total": all_stores[0]["total"]}
     
     return {
         "location": {"provincia": provincia, "localidad": localidad},
@@ -176,7 +176,7 @@ def compare_prices(
         "all_stores": all_stores,
         "cheapest": cheapest,
         "timestamp": time.time(),
-        "note": "Precios basados en referencias de mercado argentino. Pueden variar según promoción."
+        "note": "Precios basados en referencias de mercado argentino."
     }
 
 @app.get("/api/v1/premium/link")
