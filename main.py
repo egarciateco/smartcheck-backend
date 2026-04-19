@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import json, os, time, random
+from playwright.async_api import async_playwright
+import json, os, time, asyncio
+from typing import List, Dict
 
-app = FastAPI(title="SmartCheck-API", version="1.0.0")
+app = FastAPI(title="SmartCheck-API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -21,38 +23,9 @@ def load_json(filename):
     except:
         return {}
 
-PRECIOS = {
-    "leche": {"min": 850, "max": 1200},
-    "aceite": {"min": 1800, "max": 2500},
-    "arroz": {"min": 900, "max": 1400},
-    "fideos": {"min": 600, "max": 950},
-    "azucar": {"min": 700, "max": 1100},
-    "yerba": {"min": 1500, "max": 2200},
-}
-
-COMERCIOS = {
-    "La Plata": [
-        {"name": "Carrefour La Plata", "address": "Av. 7 N° 1050", "delivery": "45-60 min"},
-        {"name": "Coto La Plata", "address": "Calle 13 N° 890", "delivery": "60-90 min"},
-        {"name": "Jumbo La Plata", "address": "Diag. 74 N° 1200", "delivery": "40-55 min"},
-    ],
-    "Mar del Plata": [
-        {"name": "Carrefour MdP", "address": "Av. Constitución 2850", "delivery": "45-60 min"},
-        {"name": "Vital MdP", "address": "Av. Independencia 2900", "delivery": "30-45 min"},
-    ],
-    "Córdoba Capital": [
-        {"name": "Carrefour Córdoba", "address": "Av. Colón 5000", "delivery": "45-60 min"},
-        {"name": "Jumbo Córdoba", "address": "Av. Rafael Núñez 4800", "delivery": "40-55 min"},
-    ],
-    "Rosario": [
-        {"name": "Carrefour Rosario", "address": "Av. Junín 5500", "delivery": "45-60 min"},
-        {"name": "Jumbo Rosario", "address": "Av. Pellegrini 3200", "delivery": "40-55 min"},
-    ],
-}
-
 @app.get("/")
 def root():
-    return {"app": "SmartCheck-API", "status": "running"}
+    return {"app": "SmartCheck-API", "status": "running", "version": "2.0.0"}
 
 @app.get("/health")
 def health():
@@ -63,13 +36,12 @@ def get_provincias():
     data = load_json("provincias.json")
     provincias = list(data.keys()) if data and isinstance(data, dict) else []
     if not provincias:
-        provincias = ["Buenos Aires", "CABA", "Córdoba", "Santa Fe"]
+        provincias = ["Buenos Aires", "CABA", "Córdoba", "Santa Fe", "Entre Ríos"]
     return {"provincias": provincias}
 
 @app.get("/api/v1/locations/localidades")
 def get_localidades(provincia: str = Query(...)):
     data = load_json("provincias.json")
-    # ✅ LÍNEA COMPLETA - NO CORTAR:
     if provincia not in data:
         raise HTTPException(status_code=404, detail="Provincia no encontrada")
     return {"provincia": provincia, "localidades": data[provincia]}
@@ -85,16 +57,170 @@ def get_categorias():
 @app.get("/api/v1/categorias/items")
 def get_categoria_items(categoria: str = Query(...)):
     data = load_json("categorias.json")
-    # ✅ LÍNEA COMPLETA - NO CORTAR:
     if categoria not in data:
         raise HTTPException(status_code=404, detail="Rubro no encontrado")
     items = data[categoria] if isinstance(data[categoria], list) else []
     if not items:
-        items = ["leche", "aceite", "arroz", "fideos", "azucar"]
+        items = ["leche", "aceite", "arroz", "fideos", "azúcar"]
     return {"categoria": categoria, "items": items}
 
+# 🔍 SCRAPING REAL - CARREFOUR
+async def scrape_carrefour(producto: str, localidad: str) -> List[Dict]:
+    results = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(user_agent="Mozilla/5.0")
+            
+            url = f"https://www.carrefour.com.ar/s?text={producto.replace(' ', '%20')}"
+            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+            
+            # Extraer productos
+            products = await page.query_selector_all('[data-testid="product-card"], .product-item, .product')
+            
+            for prod in products[:5]:
+                try:
+                    name_el = await prod.query_selector('[data-testid="product-name"], .product-name, .name, h3')
+                    price_el = await prod.query_selector('[data-testid="product-price"], .price-now, .price, [class*="price"]')
+                    
+                    if name_el and price_el:
+                        name = await name_el.inner_text()
+                        price_text = await price_el.inner_text()
+                        
+                        # Limpiar precio
+                        price_clean = price_text.replace('$', '').replace('.', '').replace(',', '.').strip()
+                        price_digits = ''.join(c for c in price_clean if c.isdigit() or c == '.')
+                        
+                        if price_digits:
+                            price = float(price_digits)
+                            if price > 0 and price < 50000:  # Validar precio razonable
+                                results.append({
+                                    "store": "Carrefour",
+                                    "product": name.strip()[:80],
+                                    "price": round(price, 2),
+                                    "url": url,
+                                    "location": localidad,
+                                    "address": f"Carrefour {localidad}",
+                                    "delivery_time": "45-60 min",
+                                    "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
+                                    "source": "real_scraping",
+                                    "scraped_at": time.time()
+                                })
+                except Exception as e:
+                    print(f"Error extrayendo producto Carrefour: {e}")
+                    continue
+            
+            await browser.close()
+    except Exception as e:
+        print(f"Error scraping Carrefour: {e}")
+    
+    return results
+
+# 🔍 SCRAPING REAL - COTO
+async def scrape_coto(producto: str, localidad: str) -> List[Dict]:
+    results = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(user_agent="Mozilla/5.0")
+            
+            url = f"https://www.cotodigital3.com.ar/sitios/cdigi/buscar/?buscar={producto.replace(' ', '%20')}"
+            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+            
+            products = await page.query_selector_all('.producto, [class*="product"], .item')
+            
+            for prod in products[:5]:
+                try:
+                    name_el = await prod.query_selector('.nombreProducto, [class*="name"], h3')
+                    price_el = await prod.query_selector('.precioActual, [class*="price"], .price')
+                    
+                    if name_el and price_el:
+                        name = await name_el.inner_text()
+                        price_text = await price_el.inner_text()
+                        
+                        price_clean = price_text.replace('$', '').replace('.', '').replace(',', '.').strip()
+                        price_digits = ''.join(c for c in price_clean if c.isdigit() or c == '.')
+                        
+                        if price_digits:
+                            price = float(price_digits)
+                            if price > 0 and price < 50000:
+                                results.append({
+                                    "store": "Coto",
+                                    "product": name.strip()[:80],
+                                    "price": round(price, 2),
+                                    "url": url,
+                                    "location": localidad,
+                                    "address": f"Coto {localidad}",
+                                    "delivery_time": "60-90 min",
+                                    "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
+                                    "source": "real_scraping",
+                                    "scraped_at": time.time()
+                                })
+                except Exception as e:
+                    print(f"Error extrayendo producto Coto: {e}")
+                    continue
+            
+            await browser.close()
+    except Exception as e:
+        print(f"Error scraping Coto: {e}")
+    
+    return results
+
+# 🔍 SCRAPING REAL - JUMBO
+async def scrape_jumbo(producto: str, localidad: str) -> List[Dict]:
+    results = []
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            page = await browser.new_page(user_agent="Mozilla/5.0")
+            
+            url = f"https://www.jumboargentina.com.ar/buscar?q={producto.replace(' ', '%20')}"
+            await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            await page.wait_for_timeout(3000)
+            
+            products = await page.query_selector_all('.producto, [data-product], .product-card')
+            
+            for prod in products[:5]:
+                try:
+                    name_el = await prod.query_selector('.nombre, [class*="name"], h3')
+                    price_el = await prod.query_selector('.precio, [class*="price"], .price')
+                    
+                    if name_el and price_el:
+                        name = await name_el.inner_text()
+                        price_text = await price_el.inner_text()
+                        
+                        price_clean = price_text.replace('$', '').replace('.', '').replace(',', '.').strip()
+                        price_digits = ''.join(c for c in price_clean if c.isdigit() or c == '.')
+                        
+                        if price_digits:
+                            price = float(price_digits)
+                            if price > 0 and price < 50000:
+                                results.append({
+                                    "store": "Jumbo",
+                                    "product": name.strip()[:80],
+                                    "price": round(price, 2),
+                                    "url": url,
+                                    "location": localidad,
+                                    "address": f"Jumbo {localidad}",
+                                    "delivery_time": "40-55 min",
+                                    "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
+                                    "source": "real_scraping",
+                                    "scraped_at": time.time()
+                                })
+                except Exception as e:
+                    print(f"Error extrayendo producto Jumbo: {e}")
+                    continue
+            
+            await browser.close()
+    except Exception as e:
+        print(f"Error scraping Jumbo: {e}")
+    
+    return results
+
 @app.get("/api/v1/compare")
-def compare_prices(
+async def compare_prices(
     products: str = Query(...),
     provincia: str = Query(...),
     localidad: str = Query(...),
@@ -104,64 +230,82 @@ def compare_prices(
     if not product_list:
         raise HTTPException(status_code=400, detail="Faltan artículos")
     
-    comercios_lista = COMERCIOS.get(localidad, COMERCIOS["La Plata"])
-    all_stores = []
+    # Ejecutar scraping en paralelo
+    all_results = []
     
     for producto in product_list:
-        precio_ref = PRECIOS.get("leche")
-        for key, val in PRECIOS.items():
-            if key in producto.lower():
-                precio_ref = val
-                break
+        # Scraping en los 3 supermercados principales
+        carrefour_results, coto_results, jumbo_results = await asyncio.gather(
+            scrape_carrefour(producto, localidad),
+            scrape_coto(producto, localidad),
+            scrape_jumbo(producto, localidad),
+            return_exceptions=True
+        )
         
-        for comercio in comercios_lista:
-            precio = random.randint(precio_ref["min"], precio_ref["max"])
-            precio = round(precio, -1)
-            
-            all_stores.append({
-                "name": comercio["name"],
-                "address": comercio["address"] + ", " + localidad,
-                "delivery_time": comercio["delivery"],
-                "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
-                "item_prices": [{"item": producto.capitalize(), "price": precio}],
-                "total": precio,
-                "items_found": 1,
-            })
+        # Filtrar excepciones
+        if isinstance(carrefour_results, list):
+            all_results.extend(carrefour_results)
+        if isinstance(coto_results, list):
+            all_results.extend(coto_results)
+        if isinstance(jumbo_results, list):
+            all_results.extend(jumbo_results)
     
-    if len(product_list) > 1:
+    # Si hay resultados reales, agrupar por comercio
+    if all_results:
         stores_dict = {}
-        for store in all_stores:
-            name = store["name"]
-            if name not in stores_dict:
-                stores_dict[name] = {
-                    "name": name,
-                    "address": store["address"],
-                    "delivery_time": store["delivery_time"],
-                    "metodos_pago": store["metodos_pago"],
-                    "item_prices": [],
+        for result in all_results:
+            store_name = result["store"]
+            if store_name not in stores_dict:
+                stores_dict[store_name] = {
+                    "name": store_name,
+                    "address": result["address"],
                     "total": 0,
                     "items_found": 0,
+                    "delivery_time": result["delivery_time"],
+                    "metodos_pago": result["metodos_pago"],
+                    "item_prices": [],
+                    "source": "real_scraping",
+                    "scraped_at": result["scraped_at"]
                 }
-            stores_dict[name]["item_prices"].extend(store["item_prices"])
-            stores_dict[name]["total"] += store["item_prices"][0]["price"]
-            stores_dict[name]["items_found"] += 1
+            stores_dict[store_name]["item_prices"].append({
+                "item": result["product"],
+                "price": result["price"]
+            })
+            stores_dict[store_name]["total"] += result["price"]
+            stores_dict[store_name]["items_found"] += 1
+        
         all_stores = list(stores_dict.values())
+        all_stores.sort(key=lambda x: x["total"])
+        
+        return {
+            "location": {"provincia": provincia, "localidad": localidad},
+            "categoria": categoria,
+            "products": product_list,
+            "source": "real_scraping",
+            "all_stores": all_stores,
+            "cheapest": {"name": all_stores[0]["name"], "total": all_stores[0]["total"]},
+            "timestamp": time.time(),
+            "scraped_from": ["Carrefour", "Coto", "Jumbo"],
+            "note": "Precios reales obtenidos directamente de los sitios web de los supermercados. Pueden variar según promoción y disponibilidad."
+        }
     
-    all_stores.sort(key=lambda x: x["total"])
-    
-    cheapest = None
-    if all_stores and len(all_stores) > 0 and "name" in all_stores[0]:
-        cheapest = {"name": all_stores[0]["name"], "total": all_stores[0]["total"]}
-    
+    # ❌ NO HAY DATOS REALES - Ser transparente
     return {
         "location": {"provincia": provincia, "localidad": localidad},
         "categoria": categoria,
         "products": product_list,
-        "source": "referencia_mercado_argentino",
-        "all_stores": all_stores,
-        "cheapest": cheapest,
+        "source": "no_real_data",
+        "all_stores": [],
+        "cheapest": None,
         "timestamp": time.time(),
-        "note": "Precios basados en referencias de mercado argentino."
+        "message": "No se encontraron precios reales en este momento. Esto puede deberse a:",
+        "reasons": [
+            "El producto no está disponible en los supermercados consultados",
+            "Los sitios web están temporalmente indisponibles",
+            "El scraping fue bloqueado por los sitios",
+            "Intentá con otro producto más común (leche, aceite, arroz, fideos)"
+        ],
+        "suggestion": "Volvé a intentar en unos minutos o probá con productos de primera necesidad"
     }
 
 @app.get("/api/v1/premium/link")
