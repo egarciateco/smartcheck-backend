@@ -70,7 +70,7 @@ def get_provincias():
 def get_localidades(provincia: str = Query(...)):
     data = load_json("provincias.json")
     # ✅ LÍNEA COMPLETA - NO CORTAR:
-    if provincia not in 
+    if provincia not in
         raise HTTPException(status_code=404, detail="Provincia no encontrada")
     return {"provincia": provincia, "localidades": data[provincia]}
 
