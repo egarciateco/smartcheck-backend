@@ -4,7 +4,7 @@ import httpx
 import json, os, time
 from typing import List, Dict
 
-app = FastAPI(title="SmartCheck-API", version="3.0.0")
+app = FastAPI(title="SmartCheck-API", version="3.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,7 +14,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 🔥 API DE MERCADOLIBRE (oficial y gratis)
 MELI_API_BASE = "https://api.mercadolibre.com"
 
 def load_json(filename):
@@ -28,7 +27,7 @@ def load_json(filename):
 
 @app.get("/")
 def root():
-    return {"app": "SmartCheck-API", "status": "running", "version": "3.0.0"}
+    return {"app": "SmartCheck-API", "status": "running", "version": "3.1.0"}
 
 @app.get("/health")
 def health():
@@ -67,14 +66,13 @@ def get_categoria_items(categoria: str = Query(...)):
         items = ["leche", "aceite", "arroz", "fideos", "azúcar"]
     return {"categoria": categoria, "items": items}
 
-# 🔍 BUSCAR EN MERCADOLIBRE
+# 🔍 BUSCAR EN MERCADOLIBRE - VERSIÓN PERMISIVA
 async def search_meli(producto: str, localidad: str) -> List[Dict]:
-    """Busca productos en MercadoLibre Argentina"""
+    """Busca productos en MercadoLibre Argentina - Muestra TODOS los resultados"""
     results = []
     
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Buscar productos
             search_url = f"{MELI_API_BASE}/sites/MLA/search"
             params = {
                 "q": producto,
@@ -86,52 +84,64 @@ async def search_meli(producto: str, localidad: str) -> List[Dict]:
             
             if response.status_code == 200:
                 data = response.json()
+                print(f"MercadoLibre API response: {len(data.get('results', []))} productos encontrados")
                 
-                for item in data.get("results", [])[:10]:
-                    # Filtrar solo supermercados conocidos
+                for item in data.get("results", [])[:15]:
+                    price = item.get("price", 0)
+                    
+                    # Validar precio razonable
+                    if not price or price <= 0 or price > 100000:
+                        continue
+                    
+                    # Obtener datos del vendedor
                     seller = item.get("seller", {})
-                    seller_name = seller.get("nickname", "").lower()
+                    seller_name = seller.get("nickname", "Vendedor")
+                    seller_type = seller.get("seller_type", "")
                     
-                    # Supermercados oficiales en MercadoLibre
-                    supermercados_oficiales = ["carrefour", "coto", "jumbo", "disco", "vital", "supermercados"]
+                    # Determinar nombre de tienda
+                    store_name = seller_name
                     
-                    es_supermercado = any(super in seller_name for super in supermercados_oficiales)
+                    # Mapear supermercados conocidos
+                    store_map = {
+                        "carrefour": "Carrefour",
+                        "coto": "Coto Digital",
+                        "jumbo": "Jumbo",
+                        "disco": "Disco",
+                        "vital": "Vital",
+                        "cencosud": "Jumbo/Disco",
+                    }
                     
-                    # O si tiene envío full (más confiable)
-                    tiene_full = item.get("shipping", {}).get("free_shipping", False)
+                    for key, value in store_map.items():
+                        if key in seller_name.lower():
+                            store_name = value
+                            break
                     
-                    if es_supermercado or tiene_full:
-                        price = item.get("price", 0)
-                        if price and price > 0 and price < 50000:
-                            # Obtener nombre del vendedor
-                            store_name = seller.get("nickname", "Tienda Oficial")
-                            
-                            # Mapear a nombres más amigables
-                            store_map = {
-                                "carrefour": "Carrefour",
-                                "coto": "Coto Digital",
-                                "jumbo": "Jumbo",
-                                "disco": "Disco",
-                                "vital": "Vital",
-                            }
-                            
-                            for key, value in store_map.items():
-                                if key in seller_name.lower():
-                                    store_name = value
-                                    break
-                            
-                            results.append({
-                                "store": store_name,
-                                "product": item.get("title", "")[:80],
-                                "price": round(price, 2),
-                                "url": item.get("permalink", ""),
-                                "location": localidad,
-                                "address": f"{store_name} - Envío a {localidad}",
-                                "delivery_time": "24-48 hs" if item.get("shipping", {}).get("free_shipping") else "48-72 hs",
-                                "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
-                                "source": "mercadolibre_api",
-                                "fetched_at": time.time()
-                            })
+                    # Si es seller oficial o tiene buena reputación
+                    if seller_type == "official" or seller.get("reputation", {}).get("level_name") == "5_green":
+                        store_name = f"{store_name} ✓"
+                    
+                    # Verificar envío
+                    shipping = item.get("shipping", {})
+                    free_shipping = shipping.get("free_shipping", False)
+                    delivery_time = "24-48 hs" if free_shipping else "48-72 hs"
+                    
+                    results.append({
+                        "store": store_name,
+                        "product": item.get("title", "")[:80],
+                        "price": round(price, 2),
+                        "url": item.get("permalink", ""),
+                        "location": localidad,
+                        "address": f"{store_name} - Envío a {localidad}",
+                        "delivery_time": delivery_time,
+                        "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
+                        "source": "mercadolibre_api",
+                        "fetched_at": time.time()
+                    })
+                    
+                    # Limitar a 10 resultados por producto
+                    if len(results) >= 10:
+                        break
+                        
     except Exception as e:
         print(f"Error buscando en MercadoLibre: {e}")
     
@@ -148,14 +158,12 @@ async def compare_prices(
     if not product_list:
         raise HTTPException(status_code=400, detail="Faltan artículos")
     
-    # Buscar en MercadoLibre
     all_results = []
     
     for producto in product_list:
         results = await search_meli(producto, localidad)
         all_results.extend(results)
     
-    # Si hay resultados, agrupar por comercio
     if all_results:
         stores_dict = {}
         for result in all_results:
@@ -191,10 +199,9 @@ async def compare_prices(
             "cheapest": {"name": all_stores[0]["name"], "total": all_stores[0]["total"]},
             "timestamp": time.time(),
             "fetched_from": "MercadoLibre Argentina",
-            "note": "Precios reales obtenidos de la API oficial de MercadoLibre. Supermercados con tienda oficial en la plataforma."
+            "note": "Precios reales de MercadoLibre. Pueden variar según ubicación y promoción."
         }
     
-    # No hay resultados
     return {
         "location": {"provincia": provincia, "localidad": localidad},
         "categoria": categoria,
@@ -204,8 +211,24 @@ async def compare_prices(
         "cheapest": None,
         "timestamp": time.time(),
         "message": "No se encontraron productos en MercadoLibre",
-        "suggestion": "Intentá con términos más genéricos (ej: 'leche' en vez de 'leche la serenisima descremada')"
+        "suggestion": "Intentá con términos más genéricos (ej: 'leche' en vez de 'leche la serenisima')"
     }
+
+# 🔍 ENDPOINT DE DEBUG - Para ver qué devuelve MercadoLibre
+@app.get("/api/v1/debug/meli")
+async def debug_meli(producto: str = Query("leche")):
+    """Debug: Muestra respuesta cruda de MercadoLibre"""
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            search_url = f"{MELI_API_BASE}/sites/MLA/search"
+            params = {"q": producto, "limit": 5}
+            response = await client.get(search_url, params=params)
+            return {
+                "status_code": response.status_code,
+                "data": response.json()
+            }
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.get("/api/v1/premium/link")
 def premium_link():
