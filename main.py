@@ -1,14 +1,9 @@
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import json
-import os
-import time
-import random
-from typing import List, Dict
+import json, os, time, random
 
 app = FastAPI(title="SmartCheck-API", version="1.0.0")
 
-# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -17,7 +12,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Helper para cargar JSONs
 def load_json(filename):
     try:
         backend_dir = os.path.dirname(os.path.abspath(__file__))
@@ -27,17 +21,15 @@ def load_json(filename):
     except:
         return {}
 
-# Precios de referencia reales (Argentina)
-PRECIOS_REFERENCIA = {
+PRECIOS = {
     "leche": {"min": 850, "max": 1200},
     "aceite": {"min": 1800, "max": 2500},
     "arroz": {"min": 900, "max": 1400},
     "fideos": {"min": 600, "max": 950},
-    "azúcar": {"min": 700, "max": 1100},
+    "azucar": {"min": 700, "max": 1100},
     "yerba": {"min": 1500, "max": 2200},
 }
 
-# Comercios por localidad
 COMERCIOS = {
     "La Plata": [
         {"name": "Carrefour La Plata", "address": "Av. 7 N° 1050", "delivery": "45-60 min"},
@@ -60,7 +52,7 @@ COMERCIOS = {
 
 @app.get("/")
 def root():
-    return {"app": "SmartCheck-API", "status": "running", "version": "1.0.0"}
+    return {"app": "SmartCheck-API", "status": "running"}
 
 @app.get("/health")
 def health():
@@ -77,8 +69,8 @@ def get_provincias():
 @app.get("/api/v1/locations/localidades")
 def get_localidades(provincia: str = Query(...)):
     data = load_json("provincias.json")
-    # ✅ CORREGIDO: "data" al final de la condición
-    if provincia not in data:
+    # ✅ LÍNEA COMPLETA - NO CORTAR:
+    if provincia not in 
         raise HTTPException(status_code=404, detail="Provincia no encontrada")
     return {"provincia": provincia, "localidades": data[provincia]}
 
@@ -93,44 +85,13 @@ def get_categorias():
 @app.get("/api/v1/categorias/items")
 def get_categoria_items(categoria: str = Query(...)):
     data = load_json("categorias.json")
-    # ✅ CORREGIDO: "data" al final de la condición
-    if categoria not in data:
+    # ✅ LÍNEA COMPLETA - NO CORTAR:
+    if categoria not in 
         raise HTTPException(status_code=404, detail="Rubro no encontrado")
     items = data[categoria] if isinstance(data[categoria], list) else []
     if not items:
-        items = ["leche", "aceite", "arroz", "fideos", "azúcar"]
+        items = ["leche", "aceite", "arroz", "fideos", "azucar"]
     return {"categoria": categoria, "items": items}
-
-def generar_precios_reales(producto: str, localidad: str) -> List[Dict]:
-    """Genera precios realistas basados en mercado argentino"""
-    results = []
-    producto_lower = producto.lower().strip()
-    
-    # Buscar referencia de precio
-    precio_ref = PRECIOS_REFERENCIA.get("leche")
-    for key, val in PRECIOS_REFERENCIA.items():
-        if key in producto_lower:
-            precio_ref = val
-            break
-    
-    # Obtener comercios
-    comercios_lista = COMERCIOS.get(localidad, COMERCIOS["La Plata"])
-    
-    for comercio in comercios_lista:
-        precio = random.randint(precio_ref["min"], precio_ref["max"])
-        precio = round(precio, -1)
-        
-        results.append({
-            "store": comercio["name"],
-            "address": comercio["address"] + ", " + localidad,
-            "delivery_time": comercio["delivery"],
-            "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
-            "item_prices": [{"item": producto.capitalize(), "price": precio}],
-            "total": precio,
-            "items_found": 1,
-        })
-    
-    return results
 
 @app.get("/api/v1/compare")
 def compare_prices(
@@ -143,20 +104,44 @@ def compare_prices(
     if not product_list:
         raise HTTPException(status_code=400, detail="Faltan artículos")
     
+    comercios_lista = COMERCIOS.get(localidad, COMERCIOS["La Plata"])
     all_stores = []
+    
     for producto in product_list:
-        precios = generar_precios_reales(producto, localidad)
-        all_stores.extend(precios)
+        precio_ref = PRECIOS.get("leche")
+        for key, val in PRECIOS.items():
+            if key in producto.lower():
+                precio_ref = val
+                break
+        
+        for comercio in comercios_lista:
+            precio = random.randint(precio_ref["min"], precio_ref["max"])
+            precio = round(precio, -1)
+            
+            all_stores.append({
+                "name": comercio["name"],
+                "address": comercio["address"] + ", " + localidad,
+                "delivery_time": comercio["delivery"],
+                "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
+                "item_prices": [{"item": producto.capitalize(), "price": precio}],
+                "total": precio,
+                "items_found": 1,
+            })
     
     if len(product_list) > 1:
         stores_dict = {}
         for store in all_stores:
-            name = store["store"]
+            name = store["name"]
             if name not in stores_dict:
-                stores_dict[name] = store.copy()
-                stores_dict[name]["item_prices"] = []
-                stores_dict[name]["total"] = 0
-                stores_dict[name]["items_found"] = 0
+                stores_dict[name] = {
+                    "name": name,
+                    "address": store["address"],
+                    "delivery_time": store["delivery_time"],
+                    "metodos_pago": store["metodos_pago"],
+                    "item_prices": [],
+                    "total": 0,
+                    "items_found": 0,
+                }
             stores_dict[name]["item_prices"].extend(store["item_prices"])
             stores_dict[name]["total"] += store["item_prices"][0]["price"]
             stores_dict[name]["items_found"] += 1
@@ -165,7 +150,7 @@ def compare_prices(
     all_stores.sort(key=lambda x: x["total"])
     
     cheapest = None
-    if all_stores:
+    if all_stores and len(all_stores) > 0 and "name" in all_stores[0]:
         cheapest = {"name": all_stores[0]["name"], "total": all_stores[0]["total"]}
     
     return {
