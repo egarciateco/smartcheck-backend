@@ -1,10 +1,16 @@
-from fastapi import FastAPI, Query, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
-import httpx
-import json, os, time
-from typing import List, Dict
+from pydantic import BaseModel
+from typing import List, Optional, Dict
+import json
+import os
+from datetime import datetime
+from database import (
+    init_database, get_db, verificar_limite_consultas, 
+    incrementar_consulta, registrar_usuario, activar_suscripcion
+)
 
-app = FastAPI(title="SmartCheck-API", version="3.1.0")
+app = FastAPI(title="SmartCheck-API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -14,222 +20,270 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MELI_API_BASE = "https://api.mercadolibre.com"
+# Cargar datos de comercios y productos
+COMERCIOS_FILE = os.path.join(os.path.dirname(__file__), 'comercios.json')
+PRODUCTOS_FILE = os.path.join(os.path.dirname(__file__), 'productos.json')
 
-def load_json(filename):
+def cargar_comercios():
     try:
-        backend_dir = os.path.dirname(os.path.abspath(__file__))
-        filepath = os.path.join(backend_dir, filename)
-        with open(filepath, "r", encoding="utf-8") as f:
+        with open(COMERCIOS_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
     except:
-        return {}
+        return {"comercios": []}
+
+def cargar_productos():
+    try:
+        with open(PRODUCTOS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {"productos": []}
+
+# Modelos
+class UsuarioRegister(BaseModel):
+    email: str
+    password: str
+    nombre: str
+    telefono: Optional[str] = None
+    es_anonimo: bool = True
+
+class ProductoSeleccion(BaseModel):
+    producto_id: int
+    cantidad: int = 1
+
+class ComparacionRequest(BaseModel):
+    usuario_id: int
+    productos: List[ProductoSeleccion]
+    localidad: str
+    provincia: str
+
+class SuscripcionRequest(BaseModel):
+    usuario_id: int
+    plan: str = "mensual"
+
+# Endpoints
+@app.on_event("startup")
+async def startup_event():
+    init_database()
 
 @app.get("/")
 def root():
-    return {"app": "SmartCheck-API", "status": "running", "version": "3.1.0"}
+    return {"app": "SmartCheck API", "version": "1.0.0"}
 
-@app.get("/health")
-def health():
-    return {"status": "ok", "timestamp": time.time()}
-
-@app.get("/api/v1/locations/provincias")
-def get_provincias():
-    data = load_json("provincias.json")
-    provincias = list(data.keys()) if data and isinstance(data, dict) else []
-    if not provincias:
-        provincias = ["Buenos Aires", "CABA", "Córdoba", "Santa Fe", "Entre Ríos"]
-    return {"provincias": provincias}
-
-@app.get("/api/v1/locations/localidades")
-def get_localidades(provincia: str = Query(...)):
-    data = load_json("provincias.json")
-    if provincia not in data:
-        raise HTTPException(status_code=404, detail="Provincia no encontrada")
-    return {"provincia": provincia, "localidades": data[provincia]}
-
-@app.get("/api/v1/categorias")
-def get_categorias():
-    data = load_json("categorias.json")
-    categorias = list(data.keys()) if data and isinstance(data, dict) else []
-    if not categorias:
-        categorias = ["Supermercados", "Farmacias", "Electrónica"]
-    return {"categorias": categorias}
-
-@app.get("/api/v1/categorias/items")
-def get_categoria_items(categoria: str = Query(...)):
-    data = load_json("categorias.json")
-    if categoria not in data:
-        raise HTTPException(status_code=404, detail="Rubro no encontrado")
-    items = data[categoria] if isinstance(data[categoria], list) else []
-    if not items:
-        items = ["leche", "aceite", "arroz", "fideos", "azúcar"]
-    return {"categoria": categoria, "items": items}
-
-# 🔍 BUSCAR EN MERCADOLIBRE - VERSIÓN PERMISIVA
-async def search_meli(producto: str, localidad: str) -> List[Dict]:
-    """Busca productos en MercadoLibre Argentina - Muestra TODOS los resultados"""
-    results = []
+@app.post("/api/registro")
+def registro_usuario(usuario: UsuarioRegister):
+    exito, resultado = registrar_usuario(
+        usuario.email, 
+        usuario.password, 
+        usuario.nombre,
+        usuario.telefono,
+        usuario.es_anonimo
+    )
     
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            search_url = f"{MELI_API_BASE}/sites/MLA/search"
-            params = {
-                "q": producto,
-                "limit": 20,
-                "condition": "new"
-            }
+    if exito:
+        return {"success": True, "usuario_id": resultado, "message": "Usuario registrado"}
+    else:
+        raise HTTPException(status_code=400, detail=resultado)
+
+@app.post("/api/comparar")
+def comparar_precios(request: ComparacionRequest):
+    puede_consultar, mensaje = verificar_limite_consultas(request.usuario_id)
+    
+    if not puede_consultar:
+        raise HTTPException(status_code=403, detail=mensaje)
+    
+    comercios = cargar_comercios()
+    productos = cargar_productos()
+    
+    comercios_filtrados = [
+        c for c in comercios.get('comercios', [])
+        if c['localidad'].lower() == request.localidad.lower()
+        and c['provincia'].lower() == request.provincia.lower()
+    ]
+    
+    if not comercios_filtrados:
+        raise HTTPException(status_code=404, detail="No hay comercios en esta localidad")
+    
+    resultados = []
+    
+    for comercio in comercios_filtrados:
+        total = 0
+        items = []
+        
+        for prod_sel in request.productos:
+            producto = next((p for p in productos.get('productos', []) if p['id'] == prod_sel.producto_id), None)
             
-            response = await client.get(search_url, params=params)
-            
-            if response.status_code == 200:
-                data = response.json()
-                print(f"MercadoLibre API response: {len(data.get('results', []))} productos encontrados")
+            if producto:
+                precio_comercio = next(
+                    (pc for pc in comercio.get('precios', []) 
+                     if pc['producto_id'] == prod_sel.producto_id),
+                    None
+                )
                 
-                for item in data.get("results", [])[:15]:
-                    price = item.get("price", 0)
-                    
-                    # Validar precio razonable
-                    if not price or price <= 0 or price > 100000:
-                        continue
-                    
-                    # Obtener datos del vendedor
-                    seller = item.get("seller", {})
-                    seller_name = seller.get("nickname", "Vendedor")
-                    seller_type = seller.get("seller_type", "")
-                    
-                    # Determinar nombre de tienda
-                    store_name = seller_name
-                    
-                    # Mapear supermercados conocidos
-                    store_map = {
-                        "carrefour": "Carrefour",
-                        "coto": "Coto Digital",
-                        "jumbo": "Jumbo",
-                        "disco": "Disco",
-                        "vital": "Vital",
-                        "cencosud": "Jumbo/Disco",
-                    }
-                    
-                    for key, value in store_map.items():
-                        if key in seller_name.lower():
-                            store_name = value
-                            break
-                    
-                    # Si es seller oficial o tiene buena reputación
-                    if seller_type == "official" or seller.get("reputation", {}).get("level_name") == "5_green":
-                        store_name = f"{store_name} ✓"
-                    
-                    # Verificar envío
-                    shipping = item.get("shipping", {})
-                    free_shipping = shipping.get("free_shipping", False)
-                    delivery_time = "24-48 hs" if free_shipping else "48-72 hs"
-                    
-                    results.append({
-                        "store": store_name,
-                        "product": item.get("title", "")[:80],
-                        "price": round(price, 2),
-                        "url": item.get("permalink", ""),
-                        "location": localidad,
-                        "address": f"{store_name} - Envío a {localidad}",
-                        "delivery_time": delivery_time,
-                        "metodos_pago": ["Efectivo", "Débito", "Crédito", "Mercado Pago"],
-                        "source": "mercadolibre_api",
-                        "fetched_at": time.time()
+                if precio_comercio:
+                    subtotal = precio_comercio['precio'] * prod_sel.cantidad
+                    total += subtotal
+                    items.append({
+                        "producto": producto['nombre'],
+                        "cantidad": prod_sel.cantidad,
+                        "precio_unitario": precio_comercio['precio'],
+                        "subtotal": subtotal
                     })
-                    
-                    # Limitar a 10 resultados por producto
-                    if len(results) >= 10:
-                        break
-                        
-    except Exception as e:
-        print(f"Error buscando en MercadoLibre: {e}")
-    
-    return results
-
-@app.get("/api/v1/compare")
-async def compare_prices(
-    products: str = Query(...),
-    provincia: str = Query(...),
-    localidad: str = Query(...),
-    categoria: str = Query("General")
-):
-    product_list = [p.strip() for p in products.split(",") if p.strip()]
-    if not product_list:
-        raise HTTPException(status_code=400, detail="Faltan artículos")
-    
-    all_results = []
-    
-    for producto in product_list:
-        results = await search_meli(producto, localidad)
-        all_results.extend(results)
-    
-    if all_results:
-        stores_dict = {}
-        for result in all_results:
-            store_name = result["store"]
-            if store_name not in stores_dict:
-                stores_dict[store_name] = {
-                    "name": store_name,
-                    "address": result["address"],
-                    "total": 0,
-                    "items_found": 0,
-                    "delivery_time": result["delivery_time"],
-                    "metodos_pago": result["metodos_pago"],
-                    "item_prices": [],
-                    "source": "mercadolibre_api",
-                    "fetched_at": result["fetched_at"]
-                }
-            stores_dict[store_name]["item_prices"].append({
-                "item": result["product"],
-                "price": result["price"]
+        
+        if items:
+            resultados.append({
+                "comercio": comercio,
+                "items": items,
+                "total": round(total, 2)
             })
-            stores_dict[store_name]["total"] += result["price"]
-            stores_dict[store_name]["items_found"] += 1
-        
-        all_stores = list(stores_dict.values())
-        all_stores.sort(key=lambda x: x["total"])
-        
-        return {
-            "location": {"provincia": provincia, "localidad": localidad},
-            "categoria": categoria,
-            "products": product_list,
-            "source": "mercadolibre_api",
-            "all_stores": all_stores,
-            "cheapest": {"name": all_stores[0]["name"], "total": all_stores[0]["total"]},
-            "timestamp": time.time(),
-            "fetched_from": "MercadoLibre Argentina",
-            "note": "Precios reales de MercadoLibre. Pueden variar según ubicación y promoción."
-        }
+    
+    resultados.sort(key=lambda x: x['total'])
+    
+    incrementar_consulta(request.usuario_id)
+    
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO consultas (usuario_id, productos, total_mas_barato, comercio_mas_barato)
+        VALUES (?, ?, ?, ?)
+    ''', (
+        request.usuario_id,
+        json.dumps([p.producto_id for p in request.productos]),
+        resultados[0]['total'] if resultados else 0,
+        resultados[0]['comercio']['nombre_comercial'] if resultados else ""
+    ))
+    conn.commit()
+    conn.close()
     
     return {
-        "location": {"provincia": provincia, "localidad": localidad},
-        "categoria": categoria,
-        "products": product_list,
-        "source": "no_results",
-        "all_stores": [],
-        "cheapest": None,
-        "timestamp": time.time(),
-        "message": "No se encontraron productos en MercadoLibre",
-        "suggestion": "Intentá con términos más genéricos (ej: 'leche' en vez de 'leche la serenisima')"
+        "success": True,
+        "resultados": resultados,
+        "ahorro_maximo": round(resultados[-1]['total'] - resultados[0]['total'], 2) if len(resultados) > 1 else 0,
+        "consultas_restantes": 5 - (verificar_limite_consultas(request.usuario_id)[1].split(": ")[-1] if "Consultas" in verificar_limite_consultas(request.usuario_id)[1] else 0)
     }
 
-# 🔍 ENDPOINT DE DEBUG - Para ver qué devuelve MercadoLibre
-@app.get("/api/v1/debug/meli")
-async def debug_meli(producto: str = Query("leche")):
-    """Debug: Muestra respuesta cruda de MercadoLibre"""
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            search_url = f"{MELI_API_BASE}/sites/MLA/search"
-            params = {"q": producto, "limit": 5}
-            response = await client.get(search_url, params=params)
-            return {
-                "status_code": response.status_code,
-                "data": response.json()
-            }
-    except Exception as e:
-        return {"error": str(e)}
+@app.get("/api/usuario/{usuario_id}/estado")
+def obtener_estado_usuario(usuario_id: int):
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT email, nombre, es_anonimo, consultas_gratis, consultas_usadas,
+               subscription_activa, subscription_expira, ultima_consulta
+        FROM usuarios WHERE id = ?
+    ''', (usuario_id,))
+    
+    usuario = cursor.fetchone()
+    conn.close()
+    
+    if not usuario:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
+    
+    consultas_restantes = usuario['consultas_gratis'] - usuario['consultas_usadas']
+    
+    return {
+        "usuario_id": usuario_id,
+        "email": usuario['email'],
+        "nombre": usuario['nombre'],
+        "es_anonimo": usuario['es_anonimo'],
+        "consultas_restantes": max(0, consultas_restantes),
+        "subscription_activa": usuario['subscription_activa'],
+        "subscription_expira": usuario['subscription_expira'],
+        "ultima_consulta": usuario['ultima_consulta']
+    }
 
-@app.get("/api/v1/premium/link")
-def premium_link():
-    return {"payment_url": "https://mpago.la/2GetRzy"}
+@app.post("/api/suscripcion")
+def activar_suscripcion_endpoint(request: SuscripcionRequest):
+    planes = {
+        "mensual": 30,
+        "trimestral": 90,
+        "anual": 365
+    }
+    
+    if request.plan not in planes:
+        raise HTTPException(status_code=400, detail="Plan no válido")
+    
+    exito = activar_suscripcion(request.usuario_id, planes[request.plan])
+    
+    if exito:
+        return {
+            "success": True,
+            "message": f"Suscripción {request.plan} activada",
+            "dias": planes[request.plan]
+        }
+    else:
+        raise HTTPException(status_code=500, detail="Error activando suscripción")
+
+@app.get("/api/comercios")
+def listar_comercios(provincia: Optional[str] = None, localidad: Optional[str] = None):
+    comercios = cargar_comercios()
+    
+    if provincia:
+        comercios['comercios'] = [c for c in comercios['comercios'] if provincia.lower() in c['provincia'].lower()]
+    
+    if localidad:
+        comercios['comercios'] = [c for c in comercios['comercios'] if localidad.lower() in c['localidad'].lower()]
+    
+    return comercios
+
+@app.get("/api/productos")
+def listar_productos(categoria: Optional[str] = None):
+    productos = cargar_productos()
+    
+    if categoria:
+        productos['productos'] = [p for p in productos['productos'] if categoria.lower() in p['categoria'].lower()]
+    
+    return productos
+
+@app.get("/api/comercios/cadenas")
+def listar_cadenas():
+    comercios = cargar_comercios()
+    cadenas = {}
+    
+    for c in comercios.get('comercios', []):
+        nombre = c['cadena']
+        if nombre not in cadenas:
+            cadenas[nombre] = 0
+        cadenas[nombre] += 1
+    
+    return {
+        "cadenas": [{"nombre": k, "cantidad": v} for k, v in sorted(cadenas.items(), key=lambda x: x[1], reverse=True)],
+        "total_cadenas": len(cadenas)
+    }
+
+@app.get("/api/comercios/provincias")
+def listar_provincias():
+    comercios = cargar_comercios()
+    provincias = {}
+    
+    for c in comercios.get('comercios', []):
+        nombre = c['provincia']
+        if nombre not in provincias:
+            provincias[nombre] = 0
+        provincias[nombre] += 1
+    
+    return {
+        "provincias": [{"nombre": k, "cantidad": v} for k, v in sorted(provincias.items(), key=lambda x: x[1], reverse=True)],
+        "total_provincias": len(provincias)
+    }
+
+@app.get("/api/comercios/localidades")
+def listar_localidades(provincia: str = Query(...)):
+    comercios = cargar_comercios()
+    localidades = {}
+    
+    for c in comercios.get('comercios', []):
+        if provincia.lower() in c['provincia'].lower():
+            nombre = c['localidad']
+            if nombre not in localidades:
+                localidades[nombre] = 0
+            localidades[nombre] += 1
+    
+    return {
+        "provincia": provincia,
+        "localidades": [{"nombre": k, "cantidad": v} for k, v in sorted(localidades.items(), key=lambda x: x[1], reverse=True)],
+        "total": len(localidades)
+    }
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
