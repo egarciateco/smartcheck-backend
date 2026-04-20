@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Query, Body
+from fastapi import FastAPI, HTTPException, Query, Body
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional, Dict
@@ -20,7 +20,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Cargar datos de comercios y productos
 COMERCIOS_FILE = os.path.join(os.path.dirname(__file__), 'comercios.json')
 PRODUCTOS_FILE = os.path.join(os.path.dirname(__file__), 'productos.json')
 
@@ -38,7 +37,6 @@ def cargar_productos():
     except:
         return {"productos": []}
 
-# Modelos
 class UsuarioRegister(BaseModel):
     email: str
     password: str
@@ -60,7 +58,6 @@ class SuscripcionRequest(BaseModel):
     usuario_id: int
     plan: str = "mensual"
 
-# Endpoints
 @app.on_event("startup")
 async def startup_event():
     init_database()
@@ -95,7 +92,8 @@ def comparar_precios(request: ComparacionRequest):
     productos = cargar_productos()
     
     comercios_filtrados = [
-        c for c in comercios.get('comercios', [])
+        c for cadena in comercios.get('cadenas', {}).values()
+        for c in cadena.get('locales', [])
         if c['localidad'].lower() == request.localidad.lower()
         and c['provincia'].lower() == request.provincia.lower()
     ]
@@ -149,7 +147,7 @@ def comparar_precios(request: ComparacionRequest):
         request.usuario_id,
         json.dumps([p.producto_id for p in request.productos]),
         resultados[0]['total'] if resultados else 0,
-        resultados[0]['comercio']['nombre_comercial'] if resultados else ""
+        resultados[0]['comercio']['nombre'] if resultados else ""
     ))
     conn.commit()
     conn.close()
@@ -217,33 +215,28 @@ def activar_suscripcion_endpoint(request: SuscripcionRequest):
 def listar_comercios(provincia: Optional[str] = None, localidad: Optional[str] = None):
     comercios = cargar_comercios()
     
+    todos = []
+    for cadena in comercios.get('cadenas', {}).values():
+        todos.extend(cadena.get('locales', []))
+    
     if provincia:
-        comercios['comercios'] = [c for c in comercios['comercios'] if provincia.lower() in c['provincia'].lower()]
+        todos = [c for c in todos if provincia.lower() in c['provincia'].lower()]
     
     if localidad:
-        comercios['comercios'] = [c for c in comercios['comercios'] if localidad.lower() in c['localidad'].lower()]
+        todos = [c for c in todos if localidad.lower() in c['localidad'].lower()]
     
-    return comercios
-
-@app.get("/api/productos")
-def listar_productos(categoria: Optional[str] = None):
-    productos = cargar_productos()
-    
-    if categoria:
-        productos['productos'] = [p for p in productos['productos'] if categoria.lower() in p['categoria'].lower()]
-    
-    return productos
+    return {"comercios": todos, "total": len(todos)}
 
 @app.get("/api/comercios/cadenas")
 def listar_cadenas():
     comercios = cargar_comercios()
     cadenas = {}
     
-    for c in comercios.get('comercios', []):
-        nombre = c['cadena']
+    for cadena_data in comercios.get('cadenas', {}).values():
+        nombre = cadena_data['nombre_comercial']
         if nombre not in cadenas:
             cadenas[nombre] = 0
-        cadenas[nombre] += 1
+        cadenas[nombre] += len(cadena_data.get('locales', []))
     
     return {
         "cadenas": [{"nombre": k, "cantidad": v} for k, v in sorted(cadenas.items(), key=lambda x: x[1], reverse=True)],
@@ -255,11 +248,12 @@ def listar_provincias():
     comercios = cargar_comercios()
     provincias = {}
     
-    for c in comercios.get('comercios', []):
-        nombre = c['provincia']
-        if nombre not in provincias:
-            provincias[nombre] = 0
-        provincias[nombre] += 1
+    for cadena_data in comercios.get('cadenas', {}).values():
+        for local in cadena_data.get('locales', []):
+            nombre = local['provincia']
+            if nombre not in provincias:
+                provincias[nombre] = 0
+            provincias[nombre] += 1
     
     return {
         "provincias": [{"nombre": k, "cantidad": v} for k, v in sorted(provincias.items(), key=lambda x: x[1], reverse=True)],
@@ -271,17 +265,43 @@ def listar_localidades(provincia: str = Query(...)):
     comercios = cargar_comercios()
     localidades = {}
     
-    for c in comercios.get('comercios', []):
-        if provincia.lower() in c['provincia'].lower():
-            nombre = c['localidad']
-            if nombre not in localidades:
-                localidades[nombre] = 0
-            localidades[nombre] += 1
+    for cadena_data in comercios.get('cadenas', {}).values():
+        for local in cadena_data.get('locales', []):
+            if provincia.lower() in local['provincia'].lower():
+                nombre = local['localidad']
+                if nombre not in localidades:
+                    localidades[nombre] = 0
+                localidades[nombre] += 1
     
     return {
         "provincia": provincia,
         "localidades": [{"nombre": k, "cantidad": v} for k, v in sorted(localidades.items(), key=lambda x: x[1], reverse=True)],
         "total": len(localidades)
+    }
+
+@app.get("/api/productos")
+def listar_productos(categoria: Optional[str] = None):
+    productos = cargar_productos()
+    
+    if categoria:
+        productos['productos'] = [p for p in productos['productos'] if categoria.lower() in p['categoria'].lower()]
+    
+    return productos
+
+@app.get("/api/productos/categorias")
+def listar_categorias():
+    productos = cargar_productos()
+    categorias = {}
+    
+    for prod in productos.get('productos', []):
+        nombre = prod['categoria']
+        if nombre not in categorias:
+            categorias[nombre] = 0
+        categorias[nombre] += 1
+    
+    return {
+        "categorias": [{"nombre": k, "cantidad": v} for k, v in sorted(categorias.items(), key=lambda x: x[1], reverse=True)],
+        "total_categorias": len(categorias)
     }
 
 if __name__ == '__main__':
